@@ -2,6 +2,7 @@
 
 # Mac
 .DS_Store
+.go/
 
 #VSCode
 .vscode
@@ -10,3 +11,4 @@
 .idea/
 *.iml
 *.iws
+.go/
