@@ -1,0 +1,839 @@
+openapi: 3.0.3
+info:
+  title: IMF Uploader API
+  description: |
+    API for uploading, reviewing, and managing IMF (International Monetary Fund) files with JWT-based authentication and permission-based authorization.
+
+    ## Authentication & Authorization
+    All API endpoints (except `/health`) require a valid JWT token in the `Authorization` header with the format: `Bearer <token>`.
+
+    The API uses permission-based authorization with the following permissions:
+    - `imf:upload` - Upload files for review
+    - `imf:read` - View uploads and audit logs
+    - `imf:approve` - Approve pending uploads
+    - `imf:reject` - Reject pending uploads
+    - `imf:purge` - Purge Cloudflare cache
+  version: 1.0.0
+  contact:
+    name: ONS Digital
+    url: https://github.com/ONSDigital/dis-imf-uploader
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: https://{environment}.ons.gov.uk
+    description: ONS API server
+    variables:
+      environment:
+        default: api
+        enum:
+          - api
+          - api-staging
+          - api-dev
+        description: Environment name
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Uploads
+    description: File upload and management operations
+  - name: Review
+    description: Upload approval and rejection operations
+  - name: Cache
+    description: Cache management operations
+  - name: Audit
+    description: Audit log operations
+  - name: Health
+    description: Health check operations
+
+paths:
+  /api/v1/uploads:
+    post:
+      tags:
+        - Uploads
+      summary: Upload a file for review
+      description: Upload a file to temporary storage for review. Requires `imf:upload` permission.
+      operationId: uploadFile
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The file to upload (PDF, CSV, or Excel)
+      responses:
+        '201':
+          description: File uploaded successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadResponse'
+        '400':
+          description: Bad request (invalid file, validation failed, etc.)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized (missing or invalid JWT token)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden (insufficient permissions)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    get:
+      tags:
+        - Uploads
+      summary: List uploads with pagination and filtering
+      description: Retrieve a paginated list of uploads with optional status filtering. Requires `imf:read` permission.
+      operationId: listUploads
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          description: Filter by upload status
+          required: false
+          schema:
+            type: string
+            enum: [pending, approved, rejected, failed]
+        - name: page
+          in: query
+          description: Page number (default 1)
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: page_size
+          in: query
+          description: Number of items per page (default 10)
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 10
+        - name: sort_by
+          in: query
+          description: Field to sort by
+          required: false
+          schema:
+            type: string
+            enum: [uploaded_at, file_name, status]
+            default: uploaded_at
+        - name: sort_dir
+          in: query
+          description: Sort direction
+          required: false
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+      responses:
+        '200':
+          description: List of uploads retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListUploadsResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/uploads/{id}:
+    get:
+      tags:
+        - Uploads
+      summary: Get upload status by ID
+      description: Retrieve detailed information about a specific upload. Requires `imf:read` permission.
+      operationId: getUploadStatus
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          description: Upload ID
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Upload details retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Upload'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Upload not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/uploads/{id}/approve:
+    post:
+      tags:
+        - Review
+      summary: Approve an upload
+      description: |
+        Approve a pending upload, which will:
+        1. Move the file from temporary storage to permanent S3 storage
+        2. Create a backup copy
+        3. Invalidate CloudFront cache
+        4. Mark the upload as approved
+
+        Requires `imf:approve` permission.
+      operationId: approveUpload
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          description: Upload ID
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Upload approved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApproveResponse'
+        '400':
+          description: Bad request (invalid upload ID or status)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Upload not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/uploads/{id}/reject:
+    post:
+      tags:
+        - Review
+      summary: Reject an upload
+      description: Reject a pending upload with a reason. Requires `imf:reject` permission.
+      operationId: rejectUpload
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          description: Upload ID
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RejectRequest'
+      responses:
+        '200':
+          description: Upload rejected successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RejectResponse'
+        '400':
+          description: Bad request (missing reason or invalid upload ID)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Upload not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/uploads/{id}/purge-cloudflare:
+    post:
+      tags:
+        - Cache
+      summary: Purge Cloudflare cache for an upload
+      description: Invalidate the Cloudflare cache for a specific file. Requires `imf:purge` permission.
+      operationId: purgeCloudflareCache
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          description: Upload ID
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Cache purged successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  message:
+                    type: string
+                    example: Cache purged successfully
+        '400':
+          description: Bad request (invalid upload ID or file not in S3)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Upload not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/audit-logs:
+    get:
+      tags:
+        - Audit
+      summary: List audit logs with pagination and filtering
+      description: Retrieve a paginated list of audit logs with optional filtering by upload ID, action, or user email. Requires `imf:read` permission.
+      operationId: listAuditLogs
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: upload_id
+          in: query
+          description: Filter by upload ID
+          required: false
+          schema:
+            type: string
+        - name: action
+          in: query
+          description: Filter by action type
+          required: false
+          schema:
+            type: string
+            enum: [upload, approve, reject, purge]
+        - name: user_email
+          in: query
+          description: Filter by user email
+          required: false
+          schema:
+            type: string
+        - name: page
+          in: query
+          description: Page number (default 1)
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: page_size
+          in: query
+          description: Number of items per page (default 10)
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 10
+      responses:
+        '200':
+          description: Audit logs retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListAuditLogsResponse'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /health:
+    get:
+      tags:
+        - Health
+      summary: Health check endpoint
+      description: Check the health status of the service and its dependencies. No authentication required.
+      operationId: healthCheck
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthCheckResponse'
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error during health check
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Service is unhealthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthCheckResponse'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token obtained from the authentication service
+
+  schemas:
+    Upload:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Unique identifier for the upload
+          example: 507f1f77bcf86cd799439011
+        file_name:
+          type: string
+          description: Original filename
+          example: data.csv
+        file_size:
+          type: integer
+          format: int64
+          description: File size in bytes
+          example: 1048576
+        content_type:
+          type: string
+          description: MIME type of the file
+          example: text/csv
+        uploaded_by:
+          type: string
+          description: User ID of the uploader
+          example: user@example.com
+        uploaded_at:
+          type: string
+          format: date-time
+          description: Timestamp when the file was uploaded
+          example: 2026-01-23T12:00:00Z
+        status:
+          type: string
+          enum: [pending, approved, rejected, failed]
+          description: Current status of the upload
+          example: pending
+        reviewed_by:
+          type: string
+          description: User ID of the reviewer (if reviewed)
+          example: reviewer@example.com
+        reviewed_at:
+          type: string
+          format: date-time
+          description: Timestamp when the upload was reviewed
+          example: 2026-01-23T13:00:00Z
+        s3_key:
+          type: string
+          description: S3 object key (if approved)
+          example: uploads/2026/01/data.csv
+        backup_s3_key:
+          type: string
+          description: Backup S3 object key (if approved)
+          example: backups/2026/01/data.csv
+        rejection_reason:
+          type: string
+          description: Reason for rejection (if rejected)
+          example: Invalid data format
+        cloudfront_inv_id:
+          type: string
+          description: CloudFront invalidation ID
+          example: I2J3K4L5M6N7O8P9Q
+        invocation_status:
+          type: string
+          description: CloudFront invalidation status
+          example: Completed
+        file_checksum:
+          type: string
+          description: MD5 checksum of the file
+          example: 5d41402abc4b2a76b9719d911017c592
+        temp_storage_key:
+          type: string
+          description: Temporary storage key
+          example: 507f1f77bcf86cd799439012
+        expires_at:
+          type: string
+          format: date-time
+          description: Expiration time for temporary storage
+          example: 2026-01-24T12:00:00Z
+
+    UploadResponse:
+      type: object
+      required:
+        - id
+        - file_name
+        - status
+        - file_checksum
+        - message
+      properties:
+        id:
+          type: string
+          description: Unique identifier for the upload
+          example: 507f1f77bcf86cd799439011
+        file_name:
+          type: string
+          description: Original filename
+          example: data.csv
+        status:
+          type: string
+          enum: [pending, approved, rejected, failed]
+          description: Current status of the upload
+          example: pending
+        exists_in_s3:
+          type: boolean
+          description: Whether a file with the same checksum already exists in S3
+          example: false
+        file_checksum:
+          type: string
+          description: MD5 checksum of the file
+          example: 5d41402abc4b2a76b9719d911017c592
+        message:
+          type: string
+          description: Additional information about the upload
+          example: File uploaded successfully and awaiting review
+
+    ApproveResponse:
+      type: object
+      required:
+        - id
+        - status
+        - s3_key
+        - cloudflare_ready
+      properties:
+        id:
+          type: string
+          description: Upload ID
+          example: 507f1f77bcf86cd799439011
+        status:
+          type: string
+          enum: [approved]
+          description: Status after approval
+          example: approved
+        s3_key:
+          type: string
+          description: S3 object key where the file was uploaded
+          example: uploads/2026/01/data.csv
+        backup_key:
+          type: string
+          description: S3 object key for the backup copy
+          example: backups/2026/01/data.csv
+        cloudfront_inv_id:
+          type: string
+          description: CloudFront invalidation ID
+          example: I2J3K4L5M6N7O8P9Q
+        cloudflare_ready:
+          type: boolean
+          description: Whether the file is ready for Cloudflare cache purge
+          example: true
+
+    RejectRequest:
+      type: object
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          description: Reason for rejecting the upload
+          example: Invalid data format
+
+    RejectResponse:
+      type: object
+      required:
+        - status
+        - reason
+      properties:
+        status:
+          type: string
+          enum: [rejected]
+          description: Status after rejection
+          example: rejected
+        reason:
+          type: string
+          description: Reason for rejection
+          example: Invalid data format
+
+    ListUploadsResponse:
+      type: object
+      required:
+        - uploads
+        - total
+        - page
+        - page_size
+        - total_pages
+      properties:
+        uploads:
+          type: array
+          items:
+            $ref: '#/components/schemas/Upload'
+          description: List of uploads
+        total:
+          type: integer
+          format: int64
+          description: Total number of uploads matching the filter
+          example: 42
+        page:
+          type: integer
+          description: Current page number
+          example: 1
+        page_size:
+          type: integer
+          description: Number of items per page
+          example: 10
+        total_pages:
+          type: integer
+          description: Total number of pages
+          example: 5
+
+    AuditLog:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Unique identifier for the audit log entry
+          example: 507f1f77bcf86cd799439011
+        upload_id:
+          type: string
+          description: Associated upload ID
+          example: 507f1f77bcf86cd799439012
+        action:
+          type: string
+          description: Action performed
+          example: upload
+        user_id:
+          type: string
+          description: User ID who performed the action
+          example: user@example.com
+        timestamp:
+          type: string
+          format: date-time
+          description: When the action was performed
+          example: 2026-01-23T12:00:00Z
+        details:
+          type: object
+          additionalProperties:
+            type: string
+          description: Additional details about the action
+        status:
+          type: string
+          description: Status of the action
+          example: success
+        error_message:
+          type: string
+          description: Error message if the action failed
+          example: File validation failed
+
+    ListAuditLogsResponse:
+      type: object
+      required:
+        - logs
+        - total
+        - page
+        - page_size
+        - total_pages
+      properties:
+        logs:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditLog'
+          description: List of audit logs
+        total:
+          type: integer
+          format: int64
+          description: Total number of audit logs matching the filter
+          example: 100
+        page:
+          type: integer
+          description: Current page number
+          example: 1
+        page_size:
+          type: integer
+          description: Number of items per page
+          example: 10
+        total_pages:
+          type: integer
+          description: Total number of pages
+          example: 10
+
+    HealthCheckResponse:
+      type: object
+      required:
+        - status
+        - version
+        - dependencies
+      properties:
+        status:
+          type: string
+          enum: [healthy, unhealthy]
+          description: Overall health status
+          example: healthy
+        version:
+          type: string
+          description: Service version
+          example: 1.0.0
+        dependencies:
+          type: object
+          additionalProperties:
+            type: string
+          description: Health status of dependencies (mongodb, s3, redis, etc.)
+          example:
+            mongodb: healthy
+            s3: healthy
+            redis: healthy
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+        - code
+      properties:
+        error:
+          type: string
+          description: Error message
+          example: File validation failed
+        code:
+          type: integer
+          description: HTTP status code
+          example: 400
