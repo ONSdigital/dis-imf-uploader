@@ -3,65 +3,41 @@ package api
 import (
 	"bytes"
 	"context"
-	"crypto/md5"
+	"crypto/md5" // #nosec G501 - MD5 used for checksums, not security
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
 
-	"github.com/ONSdigital/dis-imf-uploader/config"
 	"github.com/ONSdigital/dis-imf-uploader/models"
-	"github.com/ONSdigital/dis-imf-uploader/mongo"
 	"github.com/ONSdigital/dis-imf-uploader/notifications"
-	"github.com/ONSdigital/dis-imf-uploader/storage"
-	"github.com/ONSdigital/dis-imf-uploader/temp"
-	"github.com/ONSdigital/dis-imf-uploader/validation"
-
 	"github.com/gorilla/mux"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
-type Handler struct {
-	cfg              *config.Config
-	db               *mongo.DB
-	s3Client         *storage.S3Client
-	cloudFrontClient *storage.CloudFrontClient
-	cloudflareClient *storage.CloudflareClient
-	slackNotifier    *notifications.SlackNotifier
-	tempStorage      temp.Storage
-	validator        *validation.FileValidator
-}
-
-func NewHandler(
-	cfg *config.Config,
-	db *mongo.DB,
-	s3 *storage.S3Client,
-	cf *storage.CloudFrontClient,
-	cflare *storage.CloudflareClient,
-	slack *notifications.SlackNotifier,
-	ts temp.Storage,
-	validator *validation.FileValidator,
-) *Handler {
-	return &Handler{
-		cfg:              cfg,
-		db:               db,
-		s3Client:         s3,
-		cloudFrontClient: cf,
-		cloudflareClient: cflare,
-		slackNotifier:    slack,
-		tempStorage:      ts,
-		validator:        validator,
-	}
-}
+const (
+	healthStatusHealthy   = "healthy"
+	healthStatusUnhealthy = "unhealthy"
+)
 
 // UploadFile handles file upload
-func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
+func (api *IMFUploaderAPI) UploadFile(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
 
+	// Extract user ID from JWT token
+	userID, err := api.GetUserID(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, models.ErrorResponse{
+			Error: "failed to extract user from token",
+			Code:  http.StatusUnauthorized,
+		})
+		return
+	}
+
 	// Parse form
-	if err := r.ParseMultipartForm(h.cfg.MaxUploadSize); err != nil {
+	if err := r.ParseMultipartForm(api.cfg.MaxUploadSize); err != nil {
 		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{
 			Error: "failed to parse form",
 			Code:  http.StatusBadRequest,
@@ -77,31 +53,31 @@ func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 
 	// Check file size
-	if fileHeader.Size > h.cfg.MaxUploadSize {
+	if fileHeader.Size > api.cfg.MaxUploadSize {
 		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{
 			Error: fmt.Sprintf("file size exceeds max allowed: %d bytes",
-				h.cfg.MaxUploadSize),
+				api.cfg.MaxUploadSize),
 			Code: http.StatusBadRequest,
 		})
 		return
 	}
 
-	userEmail := r.Header.Get("X-User-Email")
-
 	// Calculate checksum and read file
-	hash := md5.New()
+	hash := md5.New() // #nosec G401 - MD5 used for checksums, not security
 	fileData := io.TeeReader(file, hash)
 	fileBytes, _ := io.ReadAll(fileData)
 	checksum := fmt.Sprintf("%x", hash.Sum(nil))
 
 	// Validate file
-	if h.cfg.ValidationConfig.Enabled && h.validator != nil {
-		validationResult := h.validator.Validate(fileHeader.Filename, fileBytes)
+	if api.cfg.ValidationConfig.Enabled && api.validator != nil {
+		validationResult := api.validator.Validate(fileHeader.Filename, fileBytes)
 		if !validationResult.Valid {
-			h.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
+			_ = api.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
 				Type:  "error",
 				Error: fmt.Sprintf("File validation failed for %s: %s", fileHeader.Filename, validationResult.GetErrorMessage()),
 			})
@@ -116,11 +92,11 @@ func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 
 	// Store in temp storage
 	tempKey := primitive.NewObjectID().Hex()
-	expiresAt := time.Now().Add(h.cfg.TempStorageTimeout)
+	expiresAt := time.Now().Add(api.cfg.TempStorageTimeout)
 
-	err = h.tempStorage.Store(ctx, tempKey, fileBytes)
+	err = api.tempStorage.Store(ctx, tempKey, fileBytes)
 	if err != nil {
-		h.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
+		_ = api.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
 			Type:  "error",
 			Error: fmt.Sprintf("Failed to store temp file: %v", err),
 		})
@@ -133,22 +109,22 @@ func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if file exists in S3
-	exists, _ := h.s3Client.CheckFileExists(ctx, fileHeader.Filename)
+	exists, _ := api.s3Client.CheckFileExists(ctx, fileHeader.Filename)
 
 	upload := &models.Upload{
 		FileName:       fileHeader.Filename,
 		FileSize:       fileHeader.Size,
 		ContentType:    fileHeader.Header.Get("Content-Type"),
-		UploadedBy:     userEmail,
+		UploadedBy:     userID,
 		FileChecksum:   checksum,
 		TempStorageKey: tempKey,
 		Status:         models.StatusPending,
 		ExpiresAt:      &expiresAt,
 	}
 
-	err = h.db.CreateUpload(ctx, upload)
+	err = api.db.CreateUpload(ctx, upload)
 	if err != nil {
-		h.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
+		_ = api.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
 			Type:  "error",
 			Error: fmt.Sprintf("Failed to create upload record: %v", err),
 		})
@@ -161,10 +137,10 @@ func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log audit
-	h.db.LogAudit(ctx, &models.AuditLog{
+	_ = api.db.LogAudit(ctx, &models.AuditLog{
 		UploadID:  upload.ID,
 		Action:    "upload",
-		UserEmail: userEmail,
+		UserID:    userID,
 		Timestamp: time.Now(),
 		Status:    "success",
 		Details: map[string]string{
@@ -175,11 +151,9 @@ func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 	})
 
 	// Send Slack notification
-	user, _ := h.db.GetUserByEmail(ctx, userEmail)
-	h.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
+	_ = api.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
 		Type:   "upload",
 		Upload: upload,
-		User:   user,
 	})
 
 	response := models.UploadResponse{
@@ -193,27 +167,28 @@ func (h *Handler) UploadFile(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(response)
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 // ApproveUpload approves and uploads to S3
-func (h *Handler) ApproveUpload(w http.ResponseWriter, r *http.Request) {
+func (api *IMFUploaderAPI) ApproveUpload(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 	defer cancel()
 
 	vars := mux.Vars(r)
 	uploadID := vars["id"]
-	reviewerEmail := r.Header.Get("X-User-Email")
 
-	if !h.isReviewer(ctx, reviewerEmail) {
-		writeJSON(w, http.StatusForbidden, models.ErrorResponse{
-			Error: "unauthorized",
-			Code:  http.StatusForbidden,
+	// Extract user ID from JWT token
+	userID, err := api.GetUserID(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, models.ErrorResponse{
+			Error: "failed to extract user from token",
+			Code:  http.StatusUnauthorized,
 		})
 		return
 	}
 
-	upload, err := h.db.GetUpload(ctx, uploadID)
+	upload, err := api.db.GetUpload(ctx, uploadID)
 	if err != nil || upload == nil {
 		writeJSON(w, http.StatusNotFound, models.ErrorResponse{
 			Error: "upload not found",
@@ -231,19 +206,19 @@ func (h *Handler) ApproveUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Retrieve temp file
-	fileBytes, err := h.tempStorage.Get(ctx, upload.TempStorageKey)
+	fileBytes, err := api.tempStorage.Get(ctx, upload.TempStorageKey)
 	if err != nil {
-		h.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
+		_ = api.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
 			Type:       "error",
 			Upload:     upload,
 			Error:      fmt.Sprintf("Temp file not found: %v", err),
-			ReviewedBy: reviewerEmail,
+			ReviewedBy: userID,
 		})
 
-		h.db.LogAudit(ctx, &models.AuditLog{
+		_ = api.db.LogAudit(ctx, &models.AuditLog{
 			UploadID:     upload.ID,
 			Action:       "approve",
-			UserEmail:    reviewerEmail,
+			UserID:       userID,
 			Timestamp:    time.Now(),
 			Status:       "failure",
 			ErrorMessage: "temp file not found",
@@ -258,16 +233,16 @@ func (h *Handler) ApproveUpload(w http.ResponseWriter, r *http.Request) {
 
 	// Check if file exists and backup if needed
 	var backupKey string
-	exists, _ := h.s3Client.CheckFileExists(ctx, upload.FileName)
+	exists, _ := api.s3Client.CheckFileExists(ctx, upload.FileName)
 
 	if exists {
-		backupKey, err = h.s3Client.BackupFile(ctx, upload.FileName)
+		backupKey, err = api.s3Client.BackupFile(ctx, upload.FileName)
 		if err != nil {
-			h.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
+			_ = api.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
 				Type:       "error",
 				Upload:     upload,
 				Error:      fmt.Sprintf("Failed to backup file: %v", err),
-				ReviewedBy: reviewerEmail,
+				ReviewedBy: userID,
 			})
 
 			writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{
@@ -277,7 +252,7 @@ func (h *Handler) ApproveUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		h.db.SaveBackupMetadata(ctx, &models.BackupMetadata{
+		_ = api.db.SaveBackupMetadata(ctx, &models.BackupMetadata{
 			OriginalS3Key: upload.FileName,
 			BackupS3Key:   backupKey,
 			BackupDate:    time.Now(),
@@ -287,14 +262,14 @@ func (h *Handler) ApproveUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Upload to S3
-	err = h.s3Client.UploadFile(ctx, upload.FileName,
+	err = api.s3Client.UploadFile(ctx, upload.FileName,
 		bytes.NewReader(fileBytes))
 	if err != nil {
-		h.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
+		_ = api.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
 			Type:       "error",
 			Upload:     upload,
 			Error:      fmt.Sprintf("S3 upload failed: %v", err),
-			ReviewedBy: reviewerEmail,
+			ReviewedBy: userID,
 		})
 
 		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{
@@ -306,17 +281,17 @@ func (h *Handler) ApproveUpload(w http.ResponseWriter, r *http.Request) {
 
 	// Invalidate CloudFront (if configured)
 	var invID string
-	distributionID := h.cfg.CloudFrontConfig.DistributionID
+	distributionID := api.cfg.DistributionID
 	if distributionID != "" {
-		invPath := fmt.Sprintf("/%s%s*", h.cfg.S3Config.Prefix, upload.FileName)
-		invID, err = h.cloudFrontClient.InvalidateCache(ctx,
+		invPath := fmt.Sprintf("/%s%s*", api.cfg.S3Config.Prefix, upload.FileName)
+		invID, err = api.cloudFrontClient.InvalidateCache(ctx,
 			distributionID, []string{invPath})
 		if err != nil {
-			h.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
+			_ = api.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
 				Type:       "error",
 				Upload:     upload,
 				Error:      fmt.Sprintf("CloudFront invalidation failed: %v", err),
-				ReviewedBy: reviewerEmail,
+				ReviewedBy: userID,
 			})
 
 			writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{
@@ -328,21 +303,21 @@ func (h *Handler) ApproveUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Purge Cloudflare cache automatically
-	if h.cfg.CloudflareConfig.Token != "" && h.cfg.CloudflareConfig.ZoneID != "" {
+	if api.cfg.Token != "" && api.cfg.ZoneID != "" {
 		cfPath := fmt.Sprintf("/imf/%s", upload.FileName)
-		if err := h.cloudflareClient.PurgeCache(ctx, cfPath); err != nil {
+		if err := api.cloudflareClient.PurgeCache(ctx, cfPath); err != nil {
 			// Log error but don't fail the approval
-			h.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
+			_ = api.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
 				Type:       "error",
 				Upload:     upload,
 				Error:      fmt.Sprintf("Cloudflare purge failed (non-critical): %v", err),
-				ReviewedBy: reviewerEmail,
+				ReviewedBy: userID,
 			})
 		}
 	}
 
 	// Update database
-	err = h.db.UpdateUploadApproved(ctx, uploadID, reviewerEmail,
+	err = api.db.UpdateUploadApproved(ctx, uploadID, userID,
 		upload.FileName, backupKey, invID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{
@@ -353,13 +328,13 @@ func (h *Handler) ApproveUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Clean up temp file
-	h.tempStorage.Delete(ctx, upload.TempStorageKey)
+	_ = api.tempStorage.Delete(ctx, upload.TempStorageKey)
 
 	// Log success
-	h.db.LogAudit(ctx, &models.AuditLog{
+	_ = api.db.LogAudit(ctx, &models.AuditLog{
 		UploadID:  upload.ID,
 		Action:    "approve",
-		UserEmail: reviewerEmail,
+		UserID:    userID,
 		Timestamp: time.Now(),
 		Status:    "success",
 		Details: map[string]string{
@@ -372,15 +347,15 @@ func (h *Handler) ApproveUpload(w http.ResponseWriter, r *http.Request) {
 
 	// Send approval notification
 	upload.Status = models.StatusApproved
-	upload.ReviewedBy = reviewerEmail
+	upload.ReviewedBy = userID
 	upload.S3Key = upload.FileName
 	upload.BackupS3Key = backupKey
 	upload.CloudFrontInvID = invID
 
-	h.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
+	_ = api.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
 		Type:       "approve",
 		Upload:     upload,
-		ReviewedBy: reviewerEmail,
+		ReviewedBy: userID,
 	})
 
 	response := models.ApproveResponse{
@@ -394,22 +369,23 @@ func (h *Handler) ApproveUpload(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 // RejectUpload rejects an upload
-func (h *Handler) RejectUpload(w http.ResponseWriter, r *http.Request) {
+func (api *IMFUploaderAPI) RejectUpload(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
 	vars := mux.Vars(r)
 	uploadID := vars["id"]
-	reviewerEmail := r.Header.Get("X-User-Email")
 
-	if !h.isReviewer(ctx, reviewerEmail) {
-		writeJSON(w, http.StatusForbidden, models.ErrorResponse{
-			Error: "unauthorized",
-			Code:  http.StatusForbidden,
+	// Extract user ID from JWT token
+	userID, err := api.GetUserID(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, models.ErrorResponse{
+			Error: "failed to extract user from token",
+			Code:  http.StatusUnauthorized,
 		})
 		return
 	}
@@ -423,7 +399,7 @@ func (h *Handler) RejectUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	upload, _ := h.db.GetUpload(ctx, uploadID)
+	upload, _ := api.db.GetUpload(ctx, uploadID)
 	if upload == nil {
 		writeJSON(w, http.StatusNotFound, models.ErrorResponse{
 			Error: "upload not found",
@@ -432,13 +408,13 @@ func (h *Handler) RejectUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := h.db.UpdateUploadRejected(ctx, uploadID, reviewerEmail, req.Reason)
+	err = api.db.UpdateUploadRejected(ctx, uploadID, userID, req.Reason)
 	if err != nil {
-		h.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
+		_ = api.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
 			Type:       "error",
 			Upload:     upload,
 			Error:      fmt.Sprintf("Failed to reject upload: %v", err),
-			ReviewedBy: reviewerEmail,
+			ReviewedBy: userID,
 		})
 
 		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{
@@ -449,13 +425,13 @@ func (h *Handler) RejectUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Clean up temp file
-	h.tempStorage.Delete(ctx, upload.TempStorageKey)
+	_ = api.tempStorage.Delete(ctx, upload.TempStorageKey)
 
 	// Log rejection
-	h.db.LogAudit(ctx, &models.AuditLog{
+	_ = api.db.LogAudit(ctx, &models.AuditLog{
 		UploadID:  upload.ID,
 		Action:    "reject",
-		UserEmail: reviewerEmail,
+		UserID:    userID,
 		Timestamp: time.Now(),
 		Status:    "success",
 		Details: map[string]string{
@@ -465,11 +441,11 @@ func (h *Handler) RejectUpload(w http.ResponseWriter, r *http.Request) {
 
 	// Send rejection notification
 	upload.Status = models.StatusRejected
-	upload.ReviewedBy = reviewerEmail
-	h.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
+	upload.ReviewedBy = userID
+	_ = api.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
 		Type:       "reject",
 		Upload:     upload,
-		ReviewedBy: reviewerEmail,
+		ReviewedBy: userID,
 		Reason:     req.Reason,
 	})
 
@@ -480,18 +456,18 @@ func (h *Handler) RejectUpload(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 // GetUploadStatus retrieves upload status
-func (h *Handler) GetUploadStatus(w http.ResponseWriter, r *http.Request) {
+func (api *IMFUploaderAPI) GetUploadStatus(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
 	vars := mux.Vars(r)
 	uploadID := vars["id"]
 
-	upload, _ := h.db.GetUpload(ctx, uploadID)
+	upload, _ := api.db.GetUpload(ctx, uploadID)
 	if upload == nil {
 		writeJSON(w, http.StatusNotFound, models.ErrorResponse{
 			Error: "upload not found",
@@ -502,33 +478,42 @@ func (h *Handler) GetUploadStatus(w http.ResponseWriter, r *http.Request) {
 
 	// Check CloudFront status if invocation is in progress
 	if upload.CloudFrontInvID != "" && upload.InvocationStatus == "InProgress" {
-		distributionID := h.cfg.CloudFrontConfig.DistributionID
+		distributionID := api.cfg.DistributionID
 		if distributionID != "" {
-			status, _ := h.cloudFrontClient.GetInvalidationStatus(ctx,
+			status, _ := api.cloudFrontClient.GetInvalidationStatus(ctx,
 				distributionID, upload.CloudFrontInvID)
 			upload.InvocationStatus = status
 
 			if status == "Completed" {
-				h.db.UpdateCloudFrontStatus(ctx, uploadID, "Completed")
+				_ = api.db.UpdateCloudFrontStatus(ctx, uploadID, "Completed")
 			}
 		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(upload)
+	_ = json.NewEncoder(w).Encode(upload)
 }
 
 // PurgeCloudflareCache manually purges Cloudflare cache
-func (h *Handler) PurgeCloudflareCache(w http.ResponseWriter, r *http.Request) {
+func (api *IMFUploaderAPI) PurgeCloudflareCache(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
 	vars := mux.Vars(r)
 	uploadID := vars["id"]
-	reviewerEmail := r.Header.Get("X-User-Email")
 
-	upload, _ := h.db.GetUpload(ctx, uploadID)
+	// Extract user ID from JWT token
+	userID, err := api.GetUserID(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, models.ErrorResponse{
+			Error: "failed to extract user from token",
+			Code:  http.StatusUnauthorized,
+		})
+		return
+	}
+
+	upload, _ := api.db.GetUpload(ctx, uploadID)
 	if upload == nil {
 		writeJSON(w, http.StatusNotFound, models.ErrorResponse{
 			Error: "upload not found",
@@ -547,13 +532,13 @@ func (h *Handler) PurgeCloudflareCache(w http.ResponseWriter, r *http.Request) {
 
 	// Purge Cloudflare
 	cfPath := fmt.Sprintf("/imf/%s", upload.FileName)
-	err := h.cloudflareClient.PurgeCache(ctx, cfPath)
+	err = api.cloudflareClient.PurgeCache(ctx, cfPath)
 	if err != nil {
-		h.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
+		_ = api.slackNotifier.Notify(ctx, &notifications.NotificationEvent{
 			Type:       "error",
 			Upload:     upload,
 			Error:      fmt.Sprintf("Cloudflare purge failed: %v", err),
-			ReviewedBy: reviewerEmail,
+			ReviewedBy: userID,
 		})
 
 		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{
@@ -563,10 +548,10 @@ func (h *Handler) PurgeCloudflareCache(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.db.LogAudit(ctx, &models.AuditLog{
+	_ = api.db.LogAudit(ctx, &models.AuditLog{
 		UploadID:  upload.ID,
 		Action:    "purge_cloudflare",
-		UserEmail: reviewerEmail,
+		UserID:    userID,
 		Timestamp: time.Now(),
 		Status:    "success",
 	})
@@ -576,17 +561,11 @@ func (h *Handler) PurgeCloudflareCache(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// isReviewer checks if user has reviewer role
-func (h *Handler) isReviewer(ctx context.Context, email string) bool {
-	user, err := h.db.GetUserByEmail(ctx, email)
-	if err != nil || user == nil {
-		return false
-	}
-	return user.Role == models.RoleReviewer || user.Role == models.RoleAdmin
-}
+// Note: Authorization is handled via dp-permissions-api through authMiddleware.Require()
+// No need for local role checking
 
 // ListUploads retrieves uploads with filtering and pagination
-func (h *Handler) ListUploads(w http.ResponseWriter, r *http.Request) {
+func (api *IMFUploaderAPI) ListUploads(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
@@ -595,10 +574,10 @@ func (h *Handler) ListUploads(w http.ResponseWriter, r *http.Request) {
 	pageSize := 20
 
 	if p := r.URL.Query().Get("page"); p != "" {
-		fmt.Sscanf(p, "%d", &page)
+		_, _ = fmt.Sscanf(p, "%d", &page)
 	}
 	if ps := r.URL.Query().Get("page_size"); ps != "" {
-		fmt.Sscanf(ps, "%d", &pageSize)
+		_, _ = fmt.Sscanf(ps, "%d", &pageSize)
 		if pageSize > 100 {
 			pageSize = 100
 		}
@@ -607,7 +586,7 @@ func (h *Handler) ListUploads(w http.ResponseWriter, r *http.Request) {
 	sortBy := r.URL.Query().Get("sort_by")
 	sortDir := r.URL.Query().Get("sort_dir")
 
-	uploads, total, err := h.db.ListUploads(ctx, status, page, pageSize, sortBy, sortDir)
+	uploads, total, err := api.db.ListUploads(ctx, status, page, pageSize, sortBy, sortDir)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{
 			Error: "failed to list uploads",
@@ -632,114 +611,8 @@ func (h *Handler) ListUploads(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
-// CreateUser creates a new user
-func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-
-	var req models.CreateUserRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{
-			Error: "invalid request body",
-			Code:  http.StatusBadRequest,
-		})
-		return
-	}
-
-	user := &models.User{
-		Email: req.Email,
-		Name:  req.Name,
-		Role:  req.Role,
-	}
-
-	if err := h.db.CreateUser(ctx, user); err != nil {
-		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{
-			Error: "failed to create user",
-			Code:  http.StatusInternalServerError,
-		})
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, user)
-}
-
-// GetUser retrieves a user by ID
-func (h *Handler) GetUser(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-
-	vars := mux.Vars(r)
-	userID := vars["id"]
-
-	user, err := h.db.GetUser(ctx, userID)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{
-			Error: "failed to get user",
-			Code:  http.StatusInternalServerError,
-		})
-		return
-	}
-
-	if user == nil {
-		writeJSON(w, http.StatusNotFound, models.ErrorResponse{
-			Error: "user not found",
-			Code:  http.StatusNotFound,
-		})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, user)
-}
-
-// UpdateUser updates a user
-func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-
-	vars := mux.Vars(r)
-	userID := vars["id"]
-
-	var req models.UpdateUserRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, models.ErrorResponse{
-			Error: "invalid request body",
-			Code:  http.StatusBadRequest,
-		})
-		return
-	}
-
-	if err := h.db.UpdateUser(ctx, userID, req.Name, req.Role); err != nil {
-		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{
-			Error: "failed to update user",
-			Code:  http.StatusInternalServerError,
-		})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"message": "user updated"})
-}
-
-// DeleteUser deletes a user
-func (h *Handler) DeleteUser(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-
-	vars := mux.Vars(r)
-	userID := vars["id"]
-
-	if err := h.db.DeleteUser(ctx, userID); err != nil {
-		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{
-			Error: "failed to delete user",
-			Code:  http.StatusInternalServerError,
-		})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"message": "user deleted"})
-}
-
 // ListAuditLogs retrieves audit logs with filtering
-func (h *Handler) ListAuditLogs(w http.ResponseWriter, r *http.Request) {
+func (api *IMFUploaderAPI) ListAuditLogs(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
@@ -751,16 +624,16 @@ func (h *Handler) ListAuditLogs(w http.ResponseWriter, r *http.Request) {
 	pageSize := 50
 
 	if p := r.URL.Query().Get("page"); p != "" {
-		fmt.Sscanf(p, "%d", &page)
+		_, _ = fmt.Sscanf(p, "%d", &page)
 	}
 	if ps := r.URL.Query().Get("page_size"); ps != "" {
-		fmt.Sscanf(ps, "%d", &pageSize)
+		_, _ = fmt.Sscanf(ps, "%d", &pageSize)
 		if pageSize > 200 {
 			pageSize = 200
 		}
 	}
 
-	logs, total, err := h.db.ListAuditLogs(ctx, uploadID, action, userEmail, page, pageSize)
+	logs, total, err := api.db.ListAuditLogs(ctx, uploadID, action, userEmail, page, pageSize)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, models.ErrorResponse{
 			Error: "failed to list audit logs",
@@ -786,38 +659,38 @@ func (h *Handler) ListAuditLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 // HealthCheck performs health check on all dependencies
-func (h *Handler) HealthCheck(w http.ResponseWriter, r *http.Request) {
+func (api *IMFUploaderAPI) HealthCheck(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
 	dependencies := make(map[string]string)
 
 	// Check MongoDB
-	if err := h.db.HealthCheck(ctx); err != nil {
-		dependencies["mongodb"] = "unhealthy"
+	if err := api.db.HealthCheck(ctx); err != nil {
+		dependencies["mongodb"] = healthStatusUnhealthy
 	} else {
-		dependencies["mongodb"] = "healthy"
+		dependencies["mongodb"] = healthStatusHealthy
 	}
 
 	// Check temp storage
 	testKey := "health_check_test"
-	if err := h.tempStorage.Store(ctx, testKey, []byte("test")); err != nil {
-		dependencies["temp_storage"] = "unhealthy"
+	if err := api.tempStorage.Store(ctx, testKey, []byte("test")); err != nil {
+		dependencies["temp_storage"] = healthStatusUnhealthy
 	} else {
-		h.tempStorage.Delete(ctx, testKey)
-		dependencies["temp_storage"] = "healthy"
+		_ = api.tempStorage.Delete(ctx, testKey)
+		dependencies["temp_storage"] = healthStatusHealthy
 	}
 
-	status := "healthy"
+	status := healthStatusHealthy
 	for _, v := range dependencies {
-		if v == "unhealthy" {
-			status = "unhealthy"
+		if v == healthStatusUnhealthy {
+			status = healthStatusUnhealthy
 			break
 		}
 	}
 
 	statusCode := http.StatusOK
-	if status == "unhealthy" {
+	if status == healthStatusUnhealthy {
 		statusCode = http.StatusServiceUnavailable
 	}
 
@@ -834,10 +707,5 @@ func (h *Handler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, statusCode int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(data)
-}
-
-// Helper function to get distribution ID based on environment variable
-func getDistributionID(cfg *config.Config) string {
-	return cfg.CloudFrontConfig.DistributionID
+	_ = json.NewEncoder(w).Encode(data)
 }

@@ -5,8 +5,7 @@ A secure file upload service for IMF files with approval workflow, S3 storage, C
 ## Features
 
 ### Core Functionality
-- ✅ **File Upload with Review Process**: Upload files that require approval before publishing
-- ✅ **Role-Based Access Control**: Uploader, Reviewer, and Admin roles
+- ✅ **File Upload with Review Process**: Upload files that require approval before publishing 
 - ✅ **S3 Storage**: Direct upload to AWS S3 with automatic backup of existing files
 - ✅ **CloudFront Integration**: Automatic cache invalidation on approval
 - ✅ **Cloudflare Purging**: Automatic Cloudflare cache clearing on approval
@@ -19,22 +18,16 @@ A secure file upload service for IMF files with approval workflow, S3 storage, C
 ### API Endpoints
 
 #### Uploads
-- `POST /api/v1/uploads` - Upload file for review
-- `GET /api/v1/uploads` - List uploads with pagination and filtering
-- `GET /api/v1/uploads/{id}` - Get upload status
-- `POST /api/v1/uploads/{id}/approve` - Approve upload (reviewer only)
-- `POST /api/v1/uploads/{id}/reject` - Reject upload (reviewer only)
-- `POST /api/v1/uploads/{id}/purge-cloudflare` - Manually purge Cloudflare cache
-
-#### User Management
-- `POST /api/v1/users` - Create user
-- `GET /api/v1/users/{id}` - Get user
-- `PUT /api/v1/users/{id}` - Update user
-- `DELETE /api/v1/users/{id}` - Delete user
+- `POST /api/v1/uploads` - Upload file for review (requires `imf:upload` permission)
+- `GET /api/v1/uploads` - List uploads with pagination and filtering (requires `imf:read` permission)
+- `GET /api/v1/uploads/{id}` - Get upload status (requires `imf:read` permission)
+- `POST /api/v1/uploads/{id}/approve` - Approve upload (requires `imf:approve` permission)
+- `POST /api/v1/uploads/{id}/reject` - Reject upload (requires `imf:reject` permission)
+- `POST /api/v1/uploads/{id}/purge-cloudflare` - Manually purge Cloudflare cache (requires `imf:purge` permission)
 
 #### Audit & Health
-- `GET /api/v1/audit-logs` - List audit logs with filtering
-- `GET /health` - Service health check
+- `GET /api/v1/audit-logs` - List audit logs with filtering (requires `imf:read` permission)
+- `GET /health` - Service health check (no authentication required)
 
 ## Quick Start
 
@@ -61,7 +54,7 @@ go get github.com/ONSdigital/dis-imf-uploader/sdk
 ```go
 import "github.com/ONSdigital/dis-imf-uploader/sdk"
 
-client := sdk.NewClient("http://localhost:30200", "token", "user@example.com")
+client := sdk.NewClient("http://localhost:30200", "your-jwt-token")
 upload, err := client.UploadFile(ctx, "file.pdf", fileData)
 ```
 
@@ -75,6 +68,10 @@ Environment variables:
 # Server
 BIND_ADDR="localhost:30200"
 MAX_UPLOAD_SIZE="524288000"  # 500MB
+
+# Authentication
+ENABLE_PERMISSIONS_AUTH="true"
+ZEBEDEE_URL="http://localhost:8082"
 
 # MongoDB
 MONGODB_CLUSTER_ENDPOINT="localhost:27017"
@@ -106,34 +103,60 @@ SLACK_WEBHOOK_URL="https://hooks.slack.com/..."
 ## Project Structure
 
 ```
-├── api/          # HTTP handlers, middleware, routes
-├── config/       # Configuration
-├── models/       # Data models
+├── api/          # HTTP handlers and API setup with permission-based routes
+├── config/       # Configuration management
+├── models/       # Data models (Upload, AuditLog)
 ├── mongo/        # MongoDB operations
 ├── notifications/# Slack notifications
 ├── storage/      # S3, CloudFront, Cloudflare clients
 ├── temp/         # Temporary file storage
-├── sdk/          # Go SDK
+├── validation/   # File validation
+├── sdk/          # Go SDK for client integration
 └── main.go       # Entry point with graceful shutdown
 ```
 
+## Authentication & Authorization
+
+- **JWT-based Authentication**: All API requests require a valid JWT token in the `Authorization` header
+- **Permission-based Authorization**: Integration with [dp-permissions-api](https://github.com/ONSdigital/dp-permissions-api) for fine-grained access control
+- **Required Permissions**:
+  - `imf:upload` - Upload files
+  - `imf:read` - View uploads and audit logs
+  - `imf:approve` - Approve pending uploads
+  - `imf:reject` - Reject pending uploads
+  - `imf:purge` - Manually purge Cloudflare cache
+
 ## Security
 
-- Bearer token authentication
-- Role-based access control (Uploader, Reviewer, Admin)
+- JWT token authentication via dp-permissions-api
+- Permission-based access control for all operations
 - File size limits and checksum verification
-- Complete audit trail
+- Complete audit trail with user tracking
 - Graceful shutdown with proper cleanup
 
 ## Development
 
 ```bash
-# Run tests
-go test ./... -v
+# Run tests (requires MongoDB running locally)
+make test
+
+# Run tests without MongoDB integration tests
+go test -short ./...
+
+# Run tests with coverage
+make convey
+
+# Lint code
+make lint
+
+# Security audit
+make audit
 
 # Build for production
-CGO_ENABLED=0 go build -ldflags="-s -w" -o imf-uploader
+make build
 ```
+
+**Note**: MongoDB integration tests require a running MongoDB instance on `localhost:27017`. Use `go test -short ./...` to skip these tests if MongoDB is not available.
 
 ## License
 

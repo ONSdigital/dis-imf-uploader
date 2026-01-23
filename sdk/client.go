@@ -64,13 +64,14 @@ func (c *Client) UploadFile(ctx context.Context, fileName string, fileData []byt
 
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("Authorization", "Bearer "+c.authToken)
-	req.Header.Set("X-User-Email", c.userEmail)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusAccepted {
 		return nil, c.parseError(resp)
@@ -87,7 +88,7 @@ func (c *Client) UploadFile(ctx context.Context, fileName string, fileData []byt
 // GetUploadStatus retrieves the status of an upload
 func (c *Client) GetUploadStatus(ctx context.Context, uploadID string) (*models.Upload, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET",
-		c.baseURL+"/api/v1/uploads/"+uploadID, nil)
+		c.baseURL+"/api/v1/uploads/"+uploadID, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -98,7 +99,9 @@ func (c *Client) GetUploadStatus(ctx context.Context, uploadID string) (*models.
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, c.parseError(resp)
@@ -119,7 +122,7 @@ func (c *Client) ListUploads(ctx context.Context, status string, page, pageSize 
 		url += "&status=" + status
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -130,7 +133,9 @@ func (c *Client) ListUploads(ctx context.Context, status string, page, pageSize 
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, c.parseError(resp)
@@ -147,7 +152,7 @@ func (c *Client) ListUploads(ctx context.Context, status string, page, pageSize 
 // ApproveUpload approves an upload for publishing
 func (c *Client) ApproveUpload(ctx context.Context, uploadID string) (*models.ApproveResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, "POST",
-		c.baseURL+"/api/v1/uploads/"+uploadID+"/approve", nil)
+		c.baseURL+"/api/v1/uploads/"+uploadID+"/approve", http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -158,7 +163,9 @@ func (c *Client) ApproveUpload(ctx context.Context, uploadID string) (*models.Ap
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, c.parseError(resp)
@@ -193,7 +200,9 @@ func (c *Client) RejectUpload(ctx context.Context, uploadID, reason string) erro
 	if err != nil {
 		return fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return c.parseError(resp)
@@ -205,7 +214,7 @@ func (c *Client) RejectUpload(ctx context.Context, uploadID, reason string) erro
 // PurgeCloudflareCache manually purges Cloudflare cache for an upload
 func (c *Client) PurgeCloudflareCache(ctx context.Context, uploadID string) error {
 	req, err := http.NewRequestWithContext(ctx, "POST",
-		c.baseURL+"/api/v1/uploads/"+uploadID+"/purge-cloudflare", nil)
+		c.baseURL+"/api/v1/uploads/"+uploadID+"/purge-cloudflare", http.NoBody)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -216,132 +225,9 @@ func (c *Client) PurgeCloudflareCache(ctx context.Context, uploadID string) erro
 	if err != nil {
 		return fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return c.parseError(resp)
-	}
-
-	return nil
-}
-
-// CreateUser creates a new user
-func (c *Client) CreateUser(ctx context.Context, email, name string, role models.UserRole) (*models.User, error) {
-	reqBody := models.CreateUserRequest{
-		Email: email,
-		Name:  name,
-		Role:  role,
-	}
-
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST",
-		c.baseURL+"/api/v1/users", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	c.setHeaders(req)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusCreated {
-		return nil, c.parseError(resp)
-	}
-
-	var user models.User
-	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return &user, nil
-}
-
-// GetUser retrieves a user by ID
-func (c *Client) GetUser(ctx context.Context, userID string) (*models.User, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET",
-		c.baseURL+"/api/v1/users/"+userID, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	c.setHeaders(req)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, c.parseError(resp)
-	}
-
-	var user models.User
-	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return &user, nil
-}
-
-// UpdateUser updates a user
-func (c *Client) UpdateUser(ctx context.Context, userID, name string, role models.UserRole) error {
-	reqBody := models.UpdateUserRequest{
-		Name: name,
-		Role: role,
-	}
-
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "PUT",
-		c.baseURL+"/api/v1/users/"+userID, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	c.setHeaders(req)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return c.parseError(resp)
-	}
-
-	return nil
-}
-
-// DeleteUser deletes a user
-func (c *Client) DeleteUser(ctx context.Context, userID string) error {
-	req, err := http.NewRequestWithContext(ctx, "DELETE",
-		c.baseURL+"/api/v1/users/"+userID, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
-
-	c.setHeaders(req)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return c.parseError(resp)
@@ -363,7 +249,7 @@ func (c *Client) ListAuditLogs(ctx context.Context, uploadID, action, userEmail 
 		url += "&user_email=" + userEmail
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -374,7 +260,9 @@ func (c *Client) ListAuditLogs(ctx context.Context, uploadID, action, userEmail 
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, c.parseError(resp)
@@ -390,7 +278,7 @@ func (c *Client) ListAuditLogs(ctx context.Context, uploadID, action, userEmail 
 
 // HealthCheck checks the health of the service
 func (c *Client) HealthCheck(ctx context.Context) (*models.HealthCheckResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/health", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/health", http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -399,7 +287,9 @@ func (c *Client) HealthCheck(ctx context.Context) (*models.HealthCheckResponse, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	var healthResp models.HealthCheckResponse
 	if err := json.NewDecoder(resp.Body).Decode(&healthResp); err != nil {
@@ -412,7 +302,6 @@ func (c *Client) HealthCheck(ctx context.Context) (*models.HealthCheckResponse, 
 // setHeaders sets common headers for requests
 func (c *Client) setHeaders(req *http.Request) {
 	req.Header.Set("Authorization", "Bearer "+c.authToken)
-	req.Header.Set("X-User-Email", c.userEmail)
 }
 
 // parseError parses an error response

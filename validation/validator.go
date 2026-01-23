@@ -8,6 +8,8 @@ import (
 	"strings"
 )
 
+const mimeOctetStream = "application/octet-stream"
+
 // FileValidator validates uploaded files
 type FileValidator struct {
 	AllowedExtensions []string
@@ -83,7 +85,7 @@ func (v *FileValidator) isAllowedExtension(ext string) bool {
 
 	ext = strings.ToLower(ext)
 	for _, allowed := range v.AllowedExtensions {
-		if strings.ToLower(allowed) == ext {
+		if strings.EqualFold(allowed, ext) {
 			return true
 		}
 	}
@@ -134,23 +136,23 @@ func (v *FileValidator) mimeMatchesExtension(ext, mimeType string) bool {
 
 	// Allow some common mismatches
 	// For example, PDF files are sometimes detected as application/octet-stream
-	if ext == ".pdf" && (baseMime == "application/pdf" || baseMime == "application/octet-stream") {
+	if ext == ".pdf" && (baseMime == "application/pdf" || baseMime == mimeOctetStream) {
 		return true
 	}
 
 	// Excel files
 	if (ext == ".xlsx" || ext == ".xls") &&
-		(strings.HasPrefix(baseMime, "application/vnd.") || baseMime == "application/octet-stream") {
+		(strings.HasPrefix(baseMime, "application/vnd.") || baseMime == mimeOctetStream) {
 		return true
 	}
 
 	// Word files
 	if (ext == ".docx" || ext == ".doc") &&
-		(strings.HasPrefix(baseMime, "application/vnd.") || baseMime == "application/octet-stream") {
+		(strings.HasPrefix(baseMime, "application/vnd.") || baseMime == mimeOctetStream) {
 		return true
 	}
 
-	return strings.EqualFold(baseMime, expectedBase) || baseMime == "application/octet-stream"
+	return strings.EqualFold(baseMime, expectedBase) || baseMime == mimeOctetStream
 }
 
 // GetErrorMessage returns a formatted error message

@@ -22,11 +22,11 @@ import (
 )
 
 func main() {
-    // Create SDK client
+    // Create SDK client with JWT token
     client := sdk.NewClient(
         "http://localhost:30200",
-        "your-auth-token",
-        "user@example.com",
+        "your-jwt-token",           // JWT token from authentication service
+        "user@example.com",          // User identifier (for logging/tracking)
     )
 
     ctx := context.Background()
@@ -49,29 +49,36 @@ func main() {
 - **UploadFile** - Upload a file for review
 - **GetUploadStatus** - Get current status of an upload
 - **ListUploads** - List uploads with filtering and pagination
-- **ApproveUpload** - Approve an upload (reviewer only)
-- **RejectUpload** - Reject an upload with reason (reviewer only)
-- **PurgeCloudflareCache** - Manually purge Cloudflare cache
-
-### User Management
-
-- **CreateUser** - Create a new user
-- **GetUser** - Get user by ID
-- **UpdateUser** - Update user details
-- **DeleteUser** - Delete a user
+- **ApproveUpload** - Approve an upload (requires `imf:approve` permission)
+- **RejectUpload** - Reject an upload with reason (requires `imf:reject` permission)
+- **PurgeCloudflareCache** - Manually purge Cloudflare cache (requires `imf:purge` permission)
 
 ### Audit & Monitoring
 
 - **ListAuditLogs** - List audit logs with filtering
 - **HealthCheck** - Check service health
 
+## Authentication & Authorization
+
+The service uses **JWT-based authentication** via the Authorization header. User authentication and authorization are handled by:
+
+- **Authentication**: JWT tokens validated by the service
+- **Authorization**: Permissions checked via `dp-permissions-api`
+
+Required permissions for operations:
+- `imf:upload` - Upload files
+- `imf:read` - View uploads and audit logs
+- `imf:approve` - Approve uploads
+- `imf:reject` - Reject uploads
+- `imf:purge` - Purge Cloudflare cache
+
 ## Configuration
 
 The client requires three parameters:
 
 - **baseURL**: Service API endpoint
-- **authToken**: Bearer authentication token
-- **userEmail**: Email of the user making requests
+- **authToken**: JWT Bearer authentication token
+- **userEmail**: Email/identifier of the user making requests (used for audit logging)
 
 ## Custom HTTP Client
 
@@ -92,7 +99,6 @@ client := sdk.NewClient(baseURL, token, email).WithHTTPClient(httpClient)
 See `example_test.go` for complete examples of:
 
 - Upload workflow (upload → review → approve/reject)
-- User management
 - Audit log retrieval
 - Health checks
 
@@ -110,20 +116,16 @@ if err != nil {
 
 ## API Endpoints
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/v1/uploads` | Upload file |
-| GET | `/api/v1/uploads` | List uploads |
-| GET | `/api/v1/uploads/{id}` | Get upload status |
-| POST | `/api/v1/uploads/{id}/approve` | Approve upload |
-| POST | `/api/v1/uploads/{id}/reject` | Reject upload |
-| POST | `/api/v1/uploads/{id}/purge-cloudflare` | Purge cache |
-| POST | `/api/v1/users` | Create user |
-| GET | `/api/v1/users/{id}` | Get user |
-| PUT | `/api/v1/users/{id}` | Update user |
-| DELETE | `/api/v1/users/{id}` | Delete user |
-| GET | `/api/v1/audit-logs` | List audit logs |
-| GET | `/health` | Health check |
+| Method | Endpoint | Description | Required Permission |
+|--------|----------|-------------|---------------------|
+| POST | `/api/v1/uploads` | Upload file | `imf:upload` |
+| GET | `/api/v1/uploads` | List uploads | `imf:read` |
+| GET | `/api/v1/uploads/{id}` | Get upload status | `imf:read` |
+| POST | `/api/v1/uploads/{id}/approve` | Approve upload | `imf:approve` |
+| POST | `/api/v1/uploads/{id}/reject` | Reject upload | `imf:reject` |
+| POST | `/api/v1/uploads/{id}/purge-cloudflare` | Purge cache | `imf:purge` |
+| GET | `/api/v1/audit-logs` | List audit logs | `imf:read` |
+| GET | `/health` | Health check | None |
 
 ## License
 

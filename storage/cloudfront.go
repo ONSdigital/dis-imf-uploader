@@ -12,13 +12,18 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/cloudfront/types"
 )
 
+// CloudFrontClient provides methods for interacting with AWS CloudFront.
 type CloudFrontClient struct {
 	client *cloudfront.Client
 }
 
+// NewCloudFront creates a new CloudFront client with the provided
+// configuration.
 func NewCloudFront(cfg *config.Config) (*CloudFrontClient, error) {
-	awsCfg, err := awsConfig.LoadDefaultConfig(context.Background(),
-		awsConfig.WithRegion(cfg.S3Config.Region))
+	awsCfg, err := awsConfig.LoadDefaultConfig(
+		context.Background(),
+		awsConfig.WithRegion(cfg.Region),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -28,9 +33,9 @@ func NewCloudFront(cfg *config.Config) (*CloudFrontClient, error) {
 	}, nil
 }
 
-func (c *CloudFrontClient) InvalidateCache(ctx context.Context,
-	distributionID string, paths []string) (string, error) {
-
+// InvalidateCache creates a cache invalidation for the specified paths and
+// returns the invalidation ID.
+func (c *CloudFrontClient) InvalidateCache(ctx context.Context, distributionID string, paths []string) (string, error) {
 	if distributionID == "" {
 		return "", fmt.Errorf("distribution ID is required")
 	}
@@ -38,17 +43,22 @@ func (c *CloudFrontClient) InvalidateCache(ctx context.Context,
 	items := make([]string, len(paths))
 	copy(items, paths)
 
-	invalidation, err := c.client.CreateInvalidation(ctx,
+	invalidation, err := c.client.CreateInvalidation(
+		ctx,
 		&cloudfront.CreateInvalidationInput{
 			DistributionId: aws.String(distributionID),
 			InvalidationBatch: &types.InvalidationBatch{
-				CallerReference: aws.String(fmt.Sprintf("%d", time.Now().UnixNano())),
+				CallerReference: aws.String(
+					fmt.Sprintf("%d", time.Now().UnixNano()),
+				),
 				Paths: &types.Paths{
+					// #nosec G115 - len() result is always safe to convert
 					Quantity: aws.Int32(int32(len(items))),
 					Items:    items,
 				},
 			},
-		})
+		},
+	)
 
 	if err != nil {
 		return "", err
@@ -57,14 +67,16 @@ func (c *CloudFrontClient) InvalidateCache(ctx context.Context,
 	return *invalidation.Invalidation.Id, nil
 }
 
-func (c *CloudFrontClient) GetInvalidationStatus(ctx context.Context,
-	distributionID, invID string) (string, error) {
-
-	inv, err := c.client.GetInvalidation(ctx,
+// GetInvalidationStatus retrieves the status of a CloudFront cache
+// invalidation.
+func (c *CloudFrontClient) GetInvalidationStatus(ctx context.Context, distributionID, invID string) (string, error) {
+	inv, err := c.client.GetInvalidation(
+		ctx,
 		&cloudfront.GetInvalidationInput{
 			DistributionId: aws.String(distributionID),
 			Id:             aws.String(invID),
-		})
+		},
+	)
 
 	if err != nil {
 		return "", err

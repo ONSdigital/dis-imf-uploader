@@ -6,7 +6,6 @@ import (
 	"log"
 	"os"
 
-	"github.com/ONSdigital/dis-imf-uploader/models"
 	"github.com/ONSdigital/dis-imf-uploader/sdk"
 )
 
@@ -68,46 +67,6 @@ func Example_uploadWorkflow() {
 	// }
 }
 
-func Example_userManagement() {
-	client := sdk.NewClient(
-		"http://localhost:30200",
-		"admin-auth-token",
-		"admin@example.com",
-	)
-
-	ctx := context.Background()
-
-	// Create a new user
-	user, err := client.CreateUser(ctx,
-		"newuser@example.com",
-		"New User",
-		models.RoleUploader,
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("Created user: %s (ID: %s)\n", user.Email, user.ID)
-
-	// Get user details
-	fetchedUser, err := client.GetUser(ctx, user.ID)
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("User role: %s\n", fetchedUser.Role)
-
-	// Update user
-	err = client.UpdateUser(ctx, user.ID, "Updated Name", models.RoleReviewer)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// Delete user
-	err = client.DeleteUser(ctx, user.ID)
-	if err != nil {
-		log.Fatal(err)
-	}
-}
-
 func Example_auditLogs() {
 	client := sdk.NewClient(
 		"http://localhost:30200",
@@ -128,7 +87,7 @@ func Example_auditLogs() {
 		fmt.Printf("[%s] %s by %s: %s\n",
 			log.Timestamp.Format("2006-01-02 15:04:05"),
 			log.Action,
-			log.UserEmail,
+			log.UserID,
 			log.Status,
 		)
 	}

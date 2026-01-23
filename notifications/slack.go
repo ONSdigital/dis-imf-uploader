@@ -5,33 +5,35 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/ONSdigital/dis-imf-uploader/config"
-	"github.com/ONSdigital/dis-imf-uploader/models"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/ONSdigital/dis-imf-uploader/config"
+	"github.com/ONSdigital/dis-imf-uploader/models"
 )
 
+// SlackNotifier sends notifications to Slack via webhook.
 type SlackNotifier struct {
 	config *config.SlackConfig
 }
 
+// NotificationEvent represents an event that triggers a notification.
 type NotificationEvent struct {
 	Type       string
 	Upload     *models.Upload
-	User       *models.User
 	ReviewedBy string
 	Reason     string
 	Error      string
 }
 
+// NewSlackNotifier creates a new SlackNotifier instance.
 func NewSlackNotifier(cfg *config.SlackConfig) *SlackNotifier {
 	return &SlackNotifier{config: cfg}
 }
 
-func (s *SlackNotifier) Notify(ctx context.Context,
-	event *NotificationEvent) error {
-
+// Notify sends a notification based on the event type.
+func (s *SlackNotifier) Notify(ctx context.Context, event *NotificationEvent) error {
 	if !s.config.Enabled {
 		return nil
 	}
@@ -62,9 +64,7 @@ func (s *SlackNotifier) Notify(ctx context.Context,
 	}
 }
 
-func (s *SlackNotifier) notifyUpload(ctx context.Context,
-	event *NotificationEvent) error {
-
+func (s *SlackNotifier) notifyUpload(ctx context.Context, event *NotificationEvent) error {
 	mentions := s.getMentions()
 
 	message := &SlackMessage{
@@ -102,9 +102,7 @@ func (s *SlackNotifier) notifyUpload(ctx context.Context,
 	return s.send(ctx, message)
 }
 
-func (s *SlackNotifier) notifyApprove(ctx context.Context,
-	event *NotificationEvent) error {
-
+func (s *SlackNotifier) notifyApprove(ctx context.Context, event *NotificationEvent) error {
 	message := &SlackMessage{
 		Username: s.config.BotName,
 		Channel:  s.config.Channel,
@@ -139,9 +137,7 @@ func (s *SlackNotifier) notifyApprove(ctx context.Context,
 	return s.send(ctx, message)
 }
 
-func (s *SlackNotifier) notifyReject(ctx context.Context,
-	event *NotificationEvent) error {
-
+func (s *SlackNotifier) notifyReject(ctx context.Context, event *NotificationEvent) error {
 	message := &SlackMessage{
 		Username: s.config.BotName,
 		Channel:  s.config.Channel,
@@ -175,9 +171,7 @@ func (s *SlackNotifier) notifyReject(ctx context.Context,
 	return s.send(ctx, message)
 }
 
-func (s *SlackNotifier) notifyError(ctx context.Context,
-	event *NotificationEvent) error {
-
+func (s *SlackNotifier) notifyError(ctx context.Context, event *NotificationEvent) error {
 	message := &SlackMessage{
 		Username: s.config.BotName,
 		Channel:  s.config.Channel,
@@ -224,7 +218,9 @@ func (s *SlackNotifier) send(ctx context.Context, message *SlackMessage) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("slack webhook returned %d", resp.StatusCode)
@@ -256,19 +252,20 @@ func (s *SlackNotifier) getUploadDetailsURL(uploadID string) string {
 	return fmt.Sprintf("https://your-app.example.com/dashboard/uploads/%s", uploadID)
 }
 
-func formatBytes(bytes int64) string {
+func formatBytes(numBytes int64) string {
 	const unit = 1024
-	if bytes < unit {
-		return fmt.Sprintf("%d B", bytes)
+	if numBytes < unit {
+		return fmt.Sprintf("%d B", numBytes)
 	}
 	div, exp := int64(unit), 0
-	for n := bytes / unit; n >= unit; n /= unit {
+	for n := numBytes / unit; n >= unit; n /= unit {
 		div *= unit
 		exp++
 	}
-	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+	return fmt.Sprintf("%.1f %cB", float64(numBytes)/float64(div), "KMGTPE"[exp])
 }
 
+// SlackMessage represents a Slack webhook message payload.
 type SlackMessage struct {
 	Username    string       `json:"username"`
 	Channel     string       `json:"channel"`
@@ -276,6 +273,7 @@ type SlackMessage struct {
 	Attachments []Attachment `json:"attachments"`
 }
 
+// Attachment represents a Slack message attachment.
 type Attachment struct {
 	Color     string  `json:"color"`
 	Title     string  `json:"title"`
@@ -285,6 +283,7 @@ type Attachment struct {
 	Timestamp int64   `json:"ts"`
 }
 
+// Field represents a field in a Slack attachment.
 type Field struct {
 	Title string `json:"title"`
 	Value string `json:"value"`

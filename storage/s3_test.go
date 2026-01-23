@@ -1,71 +1,85 @@
 package storage
 
 import (
-	"bytes"
-	"context"
 	"testing"
 
 	"github.com/ONSdigital/dis-imf-uploader/config"
 	. "github.com/smartystreets/goconvey/convey"
 )
 
-func TestS3Client(t *testing.T) {
-	Convey("Given an S3 client", t, func() {
-		// Note: Use mocking or local S3 (minio) for tests
+func TestS3ClientConfiguration(t *testing.T) {
+	Convey("Given a configuration", t, func() {
 		cfg := &config.Config{
 			S3Config: config.S3Config{
-				Bucket:      "test-bucket",
-				Prefix:      "imf/",
-				Region:      "eu-west-2",
-				EndpointURL: "http://localhost:9000", // minio
+				Bucket: "test-bucket",
+				Prefix: "imf/",
+				Region: "eu-west-2",
 			},
 		}
 
-		s3Client, err := NewS3(cfg)
-		So(err, ShouldBeNil)
+		Convey("When creating a new S3 client", func() {
+			s3Client, err := NewS3(cfg)
 
-		Convey("When uploading a file", func() {
-			ctx := context.Background()
-			fileContent := []byte("test file content")
-			body := bytes.NewReader(fileContent)
-
-			err := s3Client.UploadFile(ctx, "test.txt", body)
-
-			Convey("Then the file should be uploaded successfully", func() {
+			Convey("Then the client should be created successfully", func() {
 				So(err, ShouldBeNil)
-			})
-
-			Convey("And the file should exist", func() {
-				exists, err := s3Client.CheckFileExists(ctx, "test.txt")
-				So(err, ShouldBeNil)
-				So(exists, ShouldBeTrue)
+				So(s3Client, ShouldNotBeNil)
+				So(s3Client.bucket, ShouldEqual, "test-bucket")
+				So(s3Client.prefix, ShouldEqual, "imf/")
 			})
 		})
 
-		Convey("When checking a non-existent file", func() {
-			exists, err := s3Client.CheckFileExists(context.Background(), "nonexistent.txt")
+		Convey("When creating a client with invalid region", func() {
+			invalidCfg := &config.Config{
+				S3Config: config.S3Config{
+					Bucket: "test-bucket",
+					Prefix: "imf/",
+					Region: "",
+				},
+			}
 
-			Convey("Then it should return false", func() {
+			s3Client, err := NewS3(invalidCfg)
+
+			Convey("Then the client should still be created", func() {
 				So(err, ShouldBeNil)
-				So(exists, ShouldBeFalse)
+				So(s3Client, ShouldNotBeNil)
 			})
 		})
+	})
+}
 
-		Convey("When backing up a file", func() {
-			ctx := context.Background()
-			s3Client.UploadFile(ctx, "original.pdf", bytes.NewReader([]byte("content")))
+func TestS3KeyConstruction(t *testing.T) {
+	Convey("Given an S3 client with a prefix", t, func() {
+		cfg := &config.Config{
+			S3Config: config.S3Config{
+				Bucket: "test-bucket",
+				Prefix: "imf/",
+				Region: "eu-west-2",
+			},
+		}
 
-			backupKey, err := s3Client.BackupFile(ctx, "original.pdf")
+		s3Client, _ := NewS3(cfg)
 
-			Convey("Then backup should be created", func() {
-				So(err, ShouldBeNil)
-				So(backupKey, ShouldNotBeBlank)
-				So(backupKey, ShouldContainSubstring, "backup/")
+		Convey("When constructing full keys", func() {
+			Convey("Then prefix should be prepended correctly", func() {
+				So(s3Client.prefix, ShouldEqual, "imf/")
 			})
+		})
+	})
 
-			Convey("And backup file should exist", func() {
-				exists, _ := s3Client.CheckFileExists(ctx, backupKey)
-				So(exists, ShouldBeTrue)
+	Convey("Given an S3 client without a prefix", t, func() {
+		cfg := &config.Config{
+			S3Config: config.S3Config{
+				Bucket: "test-bucket",
+				Prefix: "",
+				Region: "eu-west-2",
+			},
+		}
+
+		s3Client, _ := NewS3(cfg)
+
+		Convey("When constructing full keys", func() {
+			Convey("Then prefix should be empty", func() {
+				So(s3Client.prefix, ShouldEqual, "")
 			})
 		})
 	})

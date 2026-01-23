@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"mime/multipart"
@@ -12,14 +13,14 @@ import (
 
 	"github.com/ONSdigital/dis-imf-uploader/config"
 	"github.com/ONSdigital/dis-imf-uploader/models"
-	"github.com/ONSdigital/dis-imf-uploader/notifications"
+	auth "github.com/ONSdigital/dp-authorisation/v2/authorisation"
+	"github.com/gorilla/mux"
 
 	. "github.com/smartystreets/goconvey/convey"
 )
 
-func TestHandlers(t *testing.T) {
-	Convey("Given API handlers", t, func() {
-		// Setup mocks
+func TestAPISetup(t *testing.T) {
+	Convey("Given API setup", t, func() {
 		cfg := &config.Config{
 			BindAddr:           "localhost:30200",
 			MaxUploadSize:      10 * 1024 * 1024,
@@ -27,19 +28,33 @@ func TestHandlers(t *testing.T) {
 			S3Config: config.S3Config{
 				Prefix: "imf/",
 			},
+			AuthConfig: auth.NewDefaultConfig(),
 		}
 
-		// Create mock dependencies
-		slackNotifier := notifications.NewSlackNotifier(&config.SlackConfig{
-			Enabled: false,
+		Convey("When setting up the API", func() {
+			Convey("Then router should be configured with routes", func() {
+				router := mux.NewRouter()
+
+				// Use noop auth middleware for testing
+				authMiddleware := auth.NewNoopMiddleware()
+
+				ctx := context.Background()
+
+				// Setup with nil dependencies for route registration test
+				api := Setup(ctx, cfg, router, authMiddleware, nil, nil, nil, nil, nil, nil, nil)
+
+				So(api, ShouldNotBeNil)
+				So(api.Router, ShouldEqual, router)
+				So(api.AuthMiddleware, ShouldNotBeNil)
+			})
 		})
+	})
+}
 
-		// Note: Use test doubles for DB, S3, etc.
-		// For now, demonstrating test structure
-
-		Convey("When uploading a file", func() {
-			Convey("Then upload endpoint should accept the file", func() {
-				// Build multipart form
+func TestRequestStructure(t *testing.T) {
+	Convey("Given API request structures", t, func() {
+		Convey("When creating an upload request with JWT token", func() {
+			Convey("Then request should have proper Authorization header", func() {
 				body := new(bytes.Buffer)
 				writer := multipart.NewWriter(body)
 
@@ -49,34 +64,19 @@ func TestHandlers(t *testing.T) {
 				_, err = io.WriteString(part, "test file content")
 				So(err, ShouldBeNil)
 
-				writer.Close()
+				_ = writer.Close()
 
-				// Create request
-				req := httptest.NewRequest("POST", "/api/v1/uploads/staging", body)
+				req := httptest.NewRequest("POST", "/api/v1/uploads", body)
 				req.Header.Set("Content-Type", writer.FormDataContentType())
-				req.Header.Set("X-User-Email", "user@example.com")
-				req.Header.Set("Authorization", "Bearer test-token")
+				req.Header.Set("Authorization", "Bearer test-jwt-token")
 
-				// Assert request can be parsed
 				So(req.Method, ShouldEqual, "POST")
-				So(req.Header.Get("X-User-Email"), ShouldEqual, "user@example.com")
+				So(req.Header.Get("Authorization"), ShouldContainSubstring, "Bearer")
 			})
 		})
 
-		Convey("When approving an upload", func() {
-			Convey("Then approval should validate reviewer role", func() {
-				req := httptest.NewRequest("POST", "/api/v1/uploads/123/approve", nil)
-				req.Header.Set("X-User-Email", "non-reviewer@example.com")
-
-				w := httptest.NewRecorder()
-
-				// In real test, handler would check role from DB
-				So(req.Header.Get("X-User-Email"), ShouldEqual, "non-reviewer@example.com")
-			})
-		})
-
-		Convey("When rejecting an upload", func() {
-			Convey("Then rejection should require a reason", func() {
+		Convey("When creating a reject request", func() {
+			Convey("Then request should have reason in body", func() {
 				rejectReq := models.RejectRequest{
 					Reason: "File format not acceptable",
 				}
@@ -86,66 +86,20 @@ func TestHandlers(t *testing.T) {
 
 				req := httptest.NewRequest("POST", "/api/v1/uploads/123/reject",
 					bytes.NewReader(body))
-				req.Header.Set("X-User-Email", "reviewer@example.com")
+				req.Header.Set("Authorization", "Bearer test-jwt-token")
 				req.Header.Set("Content-Type", "application/json")
 
-				So(req.ContentLength > 0, ShouldBeTrue)
+				So(req.ContentLength, ShouldBeGreaterThan, 0)
 			})
 		})
 
-		Convey("When checking upload status", func() {
-			Convey("Then status endpoint should return upload details", func() {
-				req := httptest.NewRequest("GET", "/api/v1/uploads/123", nil)
-				w := httptest.NewRecorder()
+		Convey("When creating a status check request", func() {
+			Convey("Then request should be properly formatted", func() {
+				req := httptest.NewRequest("GET", "/api/v1/uploads/123", http.NoBody)
+				req.Header.Set("Authorization", "Bearer test-jwt-token")
 
 				So(req.Method, ShouldEqual, "GET")
-				So(w.Code, ShouldEqual, http.StatusOK)
-			})
-		})
-
-		Convey("When purging Cloudflare cache", func() {
-			Convey("Then it should accept purge requests for approved uploads", func() {
-				req := httptest.NewRequest("POST", "/api/v1/uploads/123/purge-cloudflare", nil)
-				req.Header.Set("X-User-Email", "reviewer@example.com")
-
-				So(req.Method, ShouldEqual, "POST")
-				So(req.Header.Get("X-User-Email"), ShouldNotBeBlank)
-			})
-		})
-	})
-}
-
-func TestUploadFileHandler(t *testing.T) {
-	Convey("Given upload file handler", t, func() {
-		Convey("When request has invalid environment", func() {
-			Convey("Then it should return 400", func() {
-				body := new(bytes.Buffer)
-				writer := multipart.NewWriter(body)
-				part, _ := writer.CreateFormFile("file", "test.pdf")
-				io.WriteString(part, "test")
-				writer.Close()
-
-				req := httptest.NewRequest("POST", "/api/v1/uploads/invalid-env", body)
-				req.Header.Set("Content-Type", writer.FormDataContentType())
-				req.Header.Set("X-User-Email", "user@example.com")
-
 				So(req.URL.Path, ShouldContainSubstring, "uploads")
-			})
-		})
-
-		Convey("When request missing X-User-Email header", func() {
-			Convey("Then it should return 400", func() {
-				body := new(bytes.Buffer)
-				writer := multipart.NewWriter(body)
-				part, _ := writer.CreateFormFile("file", "test.pdf")
-				io.WriteString(part, "test")
-				writer.Close()
-
-				req := httptest.NewRequest("POST", "/api/v1/uploads/staging", body)
-				req.Header.Set("Content-Type", writer.FormDataContentType())
-
-				email := req.Header.Get("X-User-Email")
-				So(email, ShouldBeBlank)
 			})
 		})
 	})

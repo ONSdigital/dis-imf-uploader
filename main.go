@@ -16,38 +16,47 @@ import (
 	"github.com/ONSdigital/dis-imf-uploader/storage"
 	"github.com/ONSdigital/dis-imf-uploader/temp"
 	"github.com/ONSdigital/dis-imf-uploader/validation"
+	auth "github.com/ONSdigital/dp-authorisation/v2/authorisation"
 	"github.com/gorilla/mux"
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatalf("application error: %v", err)
+	}
+}
+
+func run() error {
 	cfg, err := config.Get()
 	if err != nil {
-		log.Fatalf("failed to load config: %v", err)
+		return err
 	}
 
 	// Initialize MongoDB
 	db, err := mongo.New(cfg.MongoConfig)
 	if err != nil {
-		log.Fatalf("failed to connect to MongoDB: %v", err)
+		return err
 	}
-	defer db.Close()
+	defer func() {
+		_ = db.Close()
+	}()
 
 	// Initialize S3 client
 	s3Client, err := storage.NewS3(cfg)
 	if err != nil {
-		log.Fatalf("failed to create S3 client: %v", err)
+		return err
 	}
 
 	// Initialize CloudFront client
 	cfClient, err := storage.NewCloudFront(cfg)
 	if err != nil {
-		log.Fatalf("failed to create CloudFront client: %v", err)
+		return err
 	}
 
 	// Initialize Cloudflare client
 	cflarClient, err := storage.NewCloudflare(cfg)
 	if err != nil {
-		log.Fatalf("failed to create Cloudflare client: %v", err)
+		return err
 	}
 
 	// Initialize Slack notifier
@@ -56,25 +65,51 @@ func main() {
 	// Initialize temp storage
 	tempStorage, err := temp.NewRedisStorage(context.Background(), cfg)
 	if err != nil {
-		log.Fatalf("failed to initialize temp storage: %v", err)
+		return err
 	}
 
 	// Initialize file validator
 	fileValidator := validation.NewFileValidator(
 		cfg.MaxUploadSize,
-		cfg.ValidationConfig.AllowedExtensions,
-		cfg.ValidationConfig.AllowedMimeTypes,
+		cfg.AllowedExtensions,
+		cfg.AllowedMimeTypes,
 	)
+
+	// Initialize auth middleware
+	ctx := context.Background()
+	authMiddleware, err := auth.NewFeatureFlaggedMiddleware(
+		ctx,
+		cfg.AuthConfig,
+		cfg.AuthConfig.JWTVerificationPublicKeys,
+	)
+	if err != nil {
+		return err
+	}
 
 	// Start temp file cleanup scheduler
 	cleanupCtx, cancelCleanup := context.WithCancel(context.Background())
 	defer cancelCleanup()
-	go startCleanupScheduler(cleanupCtx, tempStorage, cfg.TempStorageTimeout)
+	go startCleanupScheduler(
+		cleanupCtx,
+		tempStorage,
+		cfg.TempStorageTimeout,
+	)
 
 	// Setup router
 	router := mux.NewRouter()
-	api.SetupRoutes(router, cfg, db, s3Client, cfClient, cflarClient,
-		slackNotifier, tempStorage, fileValidator)
+	api.Setup(
+		ctx,
+		cfg,
+		router,
+		authMiddleware,
+		db,
+		s3Client,
+		cfClient,
+		cflarClient,
+		slackNotifier,
+		tempStorage,
+		fileValidator,
+	)
 
 	// Create an HTTP server
 	server := &http.Server{
@@ -86,36 +121,54 @@ func main() {
 	}
 
 	// Start server in goroutine
+	serverErr := make(chan error, 1)
 	go func() {
 		log.Printf("Starting server on %s", cfg.BindAddr)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server error: %v", err)
+		if err := server.ListenAndServe(); err != nil &&
+			err != http.ErrServerClosed {
+			serverErr <- err
 		}
 	}()
 
-	// Wait for interrupt signal
+	// Wait for interrupt signal or server error
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
 
-	log.Println("Shutting down server...")
+	select {
+	case <-quit:
+		log.Println("Shutting down server...")
+	case err := <-serverErr:
+		return err
+	}
 
 	// Graceful shutdown with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.GracefulShutdownTimeout)
+	shutdownCtx, cancel := context.WithTimeout(
+		context.Background(),
+		cfg.GracefulShutdownTimeout,
+	)
 	defer cancel()
 
-	if err := server.Shutdown(ctx); err != nil {
+	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("Server forced to shutdown: %v", err)
+		return err
 	}
 
 	log.Println("Server exited")
+	return nil
 }
 
-func startCleanupScheduler(ctx context.Context, storage temp.Storage, interval time.Duration) {
+func startCleanupScheduler(
+	ctx context.Context,
+	tempStorage temp.Storage,
+	interval time.Duration,
+) {
 	ticker := time.NewTicker(interval / 2) // Check twice per timeout period
 	defer ticker.Stop()
 
-	log.Printf("Starting temp file cleanup scheduler (interval: %v)", interval/2)
+	log.Printf(
+		"Starting temp file cleanup scheduler (interval: %v)",
+		interval/2,
+	)
 
 	for {
 		select {
@@ -124,7 +177,7 @@ func startCleanupScheduler(ctx context.Context, storage temp.Storage, interval t
 			return
 		case <-ticker.C:
 			// Cleanup is handled by MongoDB TTL index for database records
-			// In-memory storage doesn't persist, so no cleanup needed for temp files
+			// In-memory storage doesn't persist, so no cleanup needed
 			// This is a placeholder for Redis implementation
 			log.Println("Cleanup check completed")
 		}

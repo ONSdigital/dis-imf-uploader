@@ -37,7 +37,7 @@ func TestInMemoryStorage(t *testing.T) {
 		})
 
 		Convey("When deleting data", func() {
-			storage.Store(ctx, "to-delete", []byte("data"))
+			_ = storage.Store(ctx, "to-delete", []byte("data"))
 			err := storage.Delete(ctx, "to-delete")
 
 			Convey("Then delete should succeed", func() {

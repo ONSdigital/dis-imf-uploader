@@ -8,10 +8,12 @@ import (
 	"github.com/kelseyhightower/envconfig"
 )
 
+// MongoConfig holds MongoDB configuration settings.
 type MongoConfig struct {
 	dpMongo.MongoDriverConfig
 }
 
+// S3Config holds AWS S3 configuration settings.
 type S3Config struct {
 	Bucket      string `envconfig:"S3_BUCKET"`
 	Prefix      string `envconfig:"S3_PREFIX"`
@@ -19,20 +21,24 @@ type S3Config struct {
 	EndpointURL string `envconfig:"AWS_ENDPOINT_URL"`
 }
 
+// CloudFrontConfig holds AWS CloudFront configuration settings.
 type CloudFrontConfig struct {
 	DistributionID string `envconfig:"CF_DIST_ID"`
 }
 
+// CloudflareConfig holds Cloudflare configuration settings.
 type CloudflareConfig struct {
 	Token  string `envconfig:"CLOUDFLARE_TOKEN"`
 	Email  string `envconfig:"CLOUDFLARE_EMAIL"`
 	ZoneID string `envconfig:"CLOUDFLARE_ZONE_ID"`
 }
 
+// AWSProfileConfig holds AWS profile configuration settings.
 type AWSProfileConfig struct {
 	Profile string `envconfig:"AWS_PROFILE"`
 }
 
+// SlackConfig holds Slack notification configuration settings.
 type SlackConfig struct {
 	Enabled           bool   `envconfig:"SLACK_ENABLED"`
 	WebhookURL        string `envconfig:"SLACK_WEBHOOK_URL"`
@@ -45,6 +51,7 @@ type SlackConfig struct {
 	ReviewersMentions string `envconfig:"SLACK_REVIEWERS_MENTIONS"`
 }
 
+// RedisConfig holds Redis configuration settings.
 type RedisConfig struct {
 	Addr     string `envconfig:"REDIS_ADDR"`
 	Password string `envconfig:"REDIS_PASSWORD"`
@@ -52,12 +59,14 @@ type RedisConfig struct {
 	Prefix   string `envconfig:"REDIS_PREFIX"`
 }
 
+// ValidationConfig holds file validation configuration settings.
 type ValidationConfig struct {
 	Enabled           bool     `envconfig:"VALIDATION_ENABLED"`
 	AllowedExtensions []string `envconfig:"ALLOWED_EXTENSIONS"`
 	AllowedMimeTypes  []string `envconfig:"ALLOWED_MIME_TYPES"`
 }
 
+// Config holds all application configuration settings.
 type Config struct {
 	BindAddr                   string        `envconfig:"BIND_ADDR"`
 	GracefulShutdownTimeout    time.Duration `envconfig:"GRACEFUL_SHUTDOWN_TIMEOUT"`
@@ -85,16 +94,22 @@ type Config struct {
 var cfg *Config
 
 const (
-	UploadsCollectionTitle   = "FileUploadsCollection"
-	UploadsCollectionName    = "uploads"
-	UsersCollectionTitle     = "FileUsersCollection"
-	UsersCollectionName      = "users"
-	BackupsCollectionTitle   = "FileBackupsCollection"
-	BackupsCollectionName    = "backups"
+	// UploadsCollectionTitle is the title for the uploads collection.
+	UploadsCollectionTitle = "FileUploadsCollection"
+	// UploadsCollectionName is the name of the uploads collection.
+	UploadsCollectionName = "uploads"
+	// BackupsCollectionTitle is the title for the backups collection.
+	BackupsCollectionTitle = "FileBackupsCollection"
+	// BackupsCollectionName is the name of the backups collection.
+	BackupsCollectionName = "backups"
+	// AuditLogsCollectionTitle is the title for the audit logs collection.
 	AuditLogsCollectionTitle = "FileAuditLogsCollection"
-	AuditLogsCollectionName  = "audit_logs"
+	// AuditLogsCollectionName is the name of the audit logs collection.
+	AuditLogsCollectionName = "audit_logs"
 )
 
+// Get returns the application configuration, loading it from environment
+// variables if not already loaded.
 func Get() (*Config, error) {
 	if cfg != nil {
 		return cfg, nil
@@ -144,8 +159,15 @@ func Get() (*Config, error) {
 			Prefix:   "imf:temp:",
 		},
 		ValidationConfig: ValidationConfig{
-			Enabled:           true,
-			AllowedExtensions: []string{".pdf", ".xlsx", ".xls", ".csv", ".doc", ".docx"},
+			Enabled: true,
+			AllowedExtensions: []string{
+				".pdf",
+				".xlsx",
+				".xls",
+				".csv",
+				".doc",
+				".docx",
+			},
 			AllowedMimeTypes: []string{
 				"application/pdf",
 				"application/vnd.ms-excel",
@@ -164,7 +186,6 @@ func Get() (*Config, error) {
 				Database:        "file_uploads",
 				Collections: map[string]string{
 					UploadsCollectionTitle:   UploadsCollectionName,
-					UsersCollectionTitle:     UsersCollectionName,
 					BackupsCollectionTitle:   BackupsCollectionName,
 					AuditLogsCollectionTitle: AuditLogsCollectionName,
 				},

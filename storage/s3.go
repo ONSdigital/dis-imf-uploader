@@ -13,27 +13,37 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
+const errNotFound = "NotFound"
+
+// S3Client provides methods for interacting with AWS S3 storage.
 type S3Client struct {
 	client *s3.Client
 	bucket string
 	prefix string
 }
 
+// NewS3 creates a new S3 client with the provided configuration.
 func NewS3(cfg *config.Config) (*S3Client, error) {
-	awsCfg, err := awsConfig.LoadDefaultConfig(context.Background(),
-		awsConfig.WithRegion(cfg.S3Config.Region))
+	awsCfg, err := awsConfig.LoadDefaultConfig(
+		context.Background(),
+		awsConfig.WithRegion(cfg.Region),
+	)
 	if err != nil {
 		return nil, err
 	}
 
 	return &S3Client{
 		client: s3.NewFromConfig(awsCfg),
-		bucket: cfg.S3Config.Bucket,
+		bucket: cfg.Bucket,
 		prefix: cfg.S3Config.Prefix,
 	}, nil
 }
 
-func (s *S3Client) CheckFileExists(ctx context.Context, key string) (bool, error) {
+// CheckFileExists checks if a file exists in S3 at the given key.
+func (s *S3Client) CheckFileExists(
+	ctx context.Context,
+	key string,
+) (bool, error) {
 	fullKey := s.prefix + key
 
 	_, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
@@ -46,8 +56,8 @@ func (s *S3Client) CheckFileExists(ctx context.Context, key string) (bool, error
 	}
 
 	// Check for NotFound error (404)
-	if err.Error() == "NotFound" ||
-		(err != nil && (err.Error() == "NotFound" ||
+	if err.Error() == errNotFound ||
+		(err != nil && (err.Error() == errNotFound ||
 			err.Error() == "404")) {
 		return false, nil
 	}
@@ -55,7 +65,11 @@ func (s *S3Client) CheckFileExists(ctx context.Context, key string) (bool, error
 	return false, err
 }
 
-func (s *S3Client) BackupFile(ctx context.Context, fileName string) (string, error) {
+// BackupFile creates a backup copy of a file in S3 and returns the backup key.
+func (s *S3Client) BackupFile(
+	ctx context.Context,
+	fileName string,
+) (string, error) {
 	source := s.prefix + fileName
 	backupKey := fmt.Sprintf("backup/%d/%s", time.Now().Unix(), fileName)
 	backupPath := s.prefix + backupKey
@@ -73,6 +87,7 @@ func (s *S3Client) BackupFile(ctx context.Context, fileName string) (string, err
 	return backupKey, nil
 }
 
+// UploadFile uploads a file to S3 at the specified key.
 func (s *S3Client) UploadFile(ctx context.Context, key string, body io.Reader) error {
 	fullKey := s.prefix + key
 
@@ -91,6 +106,7 @@ func (s *S3Client) UploadFile(ctx context.Context, key string, body io.Reader) e
 	return err
 }
 
+// DeleteFile deletes a file from S3 at the specified key.
 func (s *S3Client) DeleteFile(ctx context.Context, key string) error {
 	fullKey := s.prefix + key
 
