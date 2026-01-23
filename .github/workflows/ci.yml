@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: ["main", "feature/*"]
+    branches: ["main"]
   pull_request:
     branches: ["main"]
 
@@ -12,6 +12,7 @@ concurrency:
 
 env:
   GO_VERSION: '1.24.11'
+  GOLANGCI_LINT_VERSION: 'v2.5.0'
 
 jobs:
   dis-imf-uploader-setup:
@@ -33,22 +34,10 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
-      - name: Run security audit
+      - name: Install dis-vulncheck
+        run: go install github.com/ONSdigital/dis-vulncheck@latest
+      - name: Run dis-vulncheck
         run: make audit
-
-  dis-imf-uploader-lint:
-    needs: dis-imf-uploader-setup
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-      - name: Run linters
-        run: make lint
 
   dis-imf-uploader-build:
     needs: dis-imf-uploader-setup
@@ -56,13 +45,19 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
       - name: Run Go build test
         run: make build
+
+  dis-imf-uploader-lint:
+    needs: dis-imf-uploader-setup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Run Go lint checks
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: ${{ env.GOLANGCI_LINT_VERSION }}
 
   dis-imf-uploader-unit:
     needs: dis-imf-uploader-setup
@@ -70,10 +65,15 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
       - name: Run Go unit tests
         run: make test
+
+  dis-imf-uploader-validate-spec:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Run specification validation
+        uses: fluximus-prime/redocly-cli-github-action@v1
+        with:
+          args: 'lint swagger.yaml'
